@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # lulu management script — install / service control / tuning, v2node-style.
+# Installed as `lulu`; the proxy binary is `lulu-core`. Just run `lulu` for the
+# menu. Unknown subcommands are forwarded to lulu-core (e.g. `lulu x25519`).
 #
-#   lulu.sh                 interactive menu
-#   lulu.sh install [SRC]   install (SRC = binary, .tar.gz, or URL; else auto)
-#   lulu.sh update  [SRC]   replace the binary and restart
-#   lulu.sh uninstall       remove the service and binary (keeps /etc/lulu)
-#   lulu.sh start|stop|restart|status|log
-#   lulu.sh enable|disable  boot autostart on/off
-#   lulu.sh version         installed (and running) build
-#   lulu.sh bbr             enable BBR + fq
-#   lulu.sh swap [SIZE]     enable zswap + a swapfile (default 1G)
-#   lulu.sh haproxy install|start|stop|restart|uninstall [URL]
+#   lulu                 interactive menu
+#   lulu install [SRC]   install (SRC = binary, .tar.gz, or URL; else auto)
+#   lulu update  [SRC]   replace the binary and restart
+#   lulu uninstall       remove the service and binaries (keeps /etc/lulu)
+#   lulu start|stop|restart|status|log
+#   lulu enable|disable  boot autostart on/off
+#   lulu version         installed (and running) build
+#   lulu bbr             enable BBR + fq
+#   lulu swap [SIZE]     enable zswap + a swapfile (default 1G)
+#   lulu haproxy install|start|stop|restart|uninstall [URL]
+#   lulu check -c <cfg> / lulu x25519   -> forwarded to lulu-core
 set -uo pipefail
 
 red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'; plain='\033[0m'
@@ -18,11 +21,16 @@ ok()   { echo -e "${green}$*${plain}"; }
 warn() { echo -e "${yellow}$*${plain}"; }
 err()  { echo -e "${red}$*${plain}" >&2; }
 
-BIN=/usr/local/bin/lulu
+# `lulu` is this management script (type `lulu` -> menu, v2node-style); the
+# proxy binary lives beside it as `lulu-core` and is driven by the service.
+SELF=/usr/local/bin/lulu
+CORE=/usr/local/bin/lulu-core
 CFG_DIR=/etc/lulu
 SERVICE=/etc/systemd/system/lulu.service
 # Prebuilt binary (public release repo; source stays in the private repo).
 REL_URL="${LULU_RELEASE_URL:-https://github.com/arieeses/lulu-release/releases/latest/download/lulu-x86_64-linux.tar.gz}"
+# This management script, so `install` can persist it as the `lulu` command.
+SCRIPT_URL="${LULU_SCRIPT_URL:-https://raw.githubusercontent.com/arieeses/lulu-release/main/lulu.sh}"
 # lulu accepts TOML or YAML (auto-detected by extension); prefer the user's yml.
 cfg_path() {
   if [[ -f "$CFG_DIR/config.yml" ]]; then echo "$CFG_DIR/config.yml"
@@ -90,7 +98,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$BIN -c $(cfg_path)
+ExecStart=$CORE -c $(cfg_path)
 Restart=on-failure
 RestartSec=3s
 LimitNOFILE=1048576
@@ -103,15 +111,31 @@ EOF
   systemctl daemon-reload
 }
 
-installed_version() { [[ -x "$BIN" ]] && grep -ao 'lulu [0-9.]* ([^)]*)' "$BIN" | head -1; }
+installed_version() { [[ -x "$CORE" ]] && grep -ao 'lulu [0-9.]* ([^)]*)' "$CORE" | head -1; }
+
+# Persist this management script as the `lulu` command, so `lulu` opens the
+# menu after a one-click `bash <(curl ...)` install (the script itself is
+# ephemeral there). Falls back to downloading a fresh copy when run from a pipe.
+install_self() {
+  local self="${BASH_SOURCE[0]:-$0}"
+  [[ "$self" -ef "$SELF" ]] && return 0   # already running as /usr/local/bin/lulu
+  if [[ -f "$self" && "$self" != /dev/fd/* && "$self" != /proc/self/fd/* ]]; then
+    install -m0755 "$self" "$SELF" 2>/dev/null && return 0
+  fi
+  curl -fsSL "$SCRIPT_URL" -o "$SELF" 2>/dev/null && chmod 0755 "$SELF"
+}
 
 # -------------------------------- commands ----------------------------------
 do_install() {
   need_root
-  fetch_binary "${1:-}" "$BIN" || return 1
+  fetch_binary "${1:-}" "$CORE" || return 1
+  install_self
   mkdir -p "$CFG_DIR"
   local cfg; cfg="$(cfg_path)"
   if [[ ! -f "$cfg" ]]; then
+    # The example is YAML, so it MUST be config.yml (lulu picks the parser by
+    # extension — writing YAML into config.toml would fail to parse).
+    cfg="$CFG_DIR/config.yml"
     cat >"$cfg" <<'YML'
 Log:
   Level: info
@@ -126,23 +150,24 @@ YML
   fi
   write_service
   ok "已安装: $(installed_version)"
-  if "$BIN" check -c "$cfg" >/dev/null 2>&1; then
+  if "$CORE" check -c "$cfg" >/dev/null 2>&1; then
     systemctl enable --now lulu
     ok "lulu 已启动并设为开机自启"
     systemctl --no-pager status lulu | head -4
   else
     systemctl enable lulu >/dev/null 2>&1
-    warn "配置尚未通过校验,已设开机自启但未启动。编辑 $cfg 后执行: lulu.sh start"
+    warn "配置尚未通过校验,已设开机自启但未启动。编辑 $cfg 后执行: lulu start"
   fi
 }
 
 do_update() {
   need_root
-  [[ -x "$BIN" ]] || { err "未安装,先执行: lulu.sh install"; return 1; }
+  [[ -x "$CORE" ]] || { err "未安装,先执行: lulu install"; return 1; }
   local old; old="$(installed_version)"
   local was_active=0; systemctl is-active --quiet lulu && was_active=1
   systemctl stop lulu 2>/dev/null
-  fetch_binary "${1:-}" "$BIN" || { [[ $was_active -eq 1 ]] && systemctl start lulu; return 1; }
+  fetch_binary "${1:-}" "$CORE" || { [[ $was_active -eq 1 ]] && systemctl start lulu; return 1; }
+  install_self
   write_service
   ok "更新: ${old:-?}  ->  $(installed_version)"
   [[ $was_active -eq 1 ]] && { systemctl start lulu; systemctl --no-pager status lulu | head -3; }
@@ -152,7 +177,7 @@ do_uninstall() {
   need_root
   systemctl disable --now lulu 2>/dev/null
   rm -f "$SERVICE"; systemctl daemon-reload; systemctl reset-failed 2>/dev/null
-  rm -f "$BIN"
+  rm -f "$CORE" "$SELF"
   ok "已卸载 lulu(配置保留在 $CFG_DIR;如需一并删除: rm -rf $CFG_DIR)"
 }
 
@@ -161,7 +186,7 @@ do_status() { systemctl --no-pager status lulu; }
 do_log() { journalctl -u lulu -n "${1:-100}" -f; }
 do_version() {
   echo "二进制: $(installed_version || echo 未安装)"
-  systemctl is-active --quiet lulu && echo "运行中: $("$BIN" version 2>/dev/null)"
+  systemctl is-active --quiet lulu && echo "运行中: $("$CORE" version 2>/dev/null)"
 }
 
 do_bbr() {
@@ -315,5 +340,6 @@ case "${1:-menu}" in
   swap)      do_swap "${2:-1G}" ;;
   haproxy)   do_haproxy "${2:-install}" "${3:-}" ;;
   menu|"")   menu ;;
-  *) err "未知命令: $1"; echo "用法见脚本头部注释"; exit 1 ;;
+  # Anything else (check, x25519, ...) goes straight to the proxy binary.
+  *) [[ -x "$CORE" ]] && exec "$CORE" "$@"; err "未知命令: $1(lulu 未安装?)"; exit 1 ;;
 esac
