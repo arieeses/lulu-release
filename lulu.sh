@@ -324,6 +324,16 @@ EOF
   esac
 }
 
+# Let a normal user just type `lulu`: re-exec through sudo when not root. Only
+# for the installed script (the piped one-click already runs as root), and only
+# when sudo exists — otherwise the per-command need_root check still guards.
+if [[ $EUID -ne 0 ]]; then
+  _self="${BASH_SOURCE[0]:-$0}"
+  if [[ -f "$_self" && "$_self" != /dev/fd/* && "$_self" != /proc/self/fd/* ]] && command -v sudo >/dev/null 2>&1; then
+    exec sudo -- bash "$_self" "$@"
+  fi
+fi
+
 case "${1:-menu}" in
   install)   do_install "${2:-}" ;;
   update)    do_update "${2:-}" ;;
