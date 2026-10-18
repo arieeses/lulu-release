@@ -55,16 +55,13 @@ pkg_install() {
 fetch_binary() {
   local src="$1" dest="$2" tmp
   tmp="$(mktemp -d)"
+  # No explicit source -> always pull the latest published release, so the
+  # result is deterministic (not whatever stale binary happens to be lying
+  # around). To install a specific local build, pass it: install ./lulu or
+  # install ./lulu-x86_64-linux.tar.gz.
   if [[ -z "$src" ]]; then
-    # Auto: prefer a freshly extracted binary, then a local tarball, then cwd.
-    for c in /root/lulu-new/lulu ./lulu /root/lulu; do
-      [[ -f "$c" && ! -d "$c" ]] && { src="$c"; break; }
-    done
-    [[ -z "$src" ]] && for t in /root/lulu-x86_64-linux.tar.gz ./lulu-x86_64-linux.tar.gz; do
-      [[ -f "$t" ]] && { src="$t"; break; }
-    done
-    # Nothing local -> download the latest prebuilt release (true one-click).
-    [[ -z "$src" ]] && { src="$REL_URL"; warn "未找到本地二进制,从发布页下载: $src"; }
+    src="$REL_URL"
+    warn "从发布页下载最新版: $src"
   fi
   [[ -z "$src" ]] && { err "找不到二进制;用法: install /路径/lulu 或 install xxx.tar.gz 或 install <URL>"; rm -rf "$tmp"; return 1; }
   # URL -> download into tmp, keep the name.
